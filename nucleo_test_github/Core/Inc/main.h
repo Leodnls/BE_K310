@@ -1,4 +1,4 @@
-/* USER CODE BEGIN test de changement Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.h
