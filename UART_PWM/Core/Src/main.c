@@ -18,7 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -45,12 +47,20 @@ TIM_HandleTypeDef htim14;
 
 /* USER CODE BEGIN PV */
 volatile uint8_t rx_byte = 0;
-volatile uint8_t last_rx = 0;
 volatile uint32_t rx_count = 0;
 volatile uint32_t uart_err_count = 0;
 volatile uint32_t uart_last_err = 0;
 
-volatile uint16_t pwm_us = 1000;
+volatile int32_t coord_x = 0;
+volatile int32_t coord_y = 0;
+volatile float servo_angle_deg = 0.0f;
+volatile uint16_t pwm_us = 600;
+
+volatile uint32_t frame_count = 0;
+volatile uint32_t parse_err_count = 0;
+
+char rx_line[32];
+volatile uint8_t rx_line_idx = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,28 +81,112 @@ void UART_Start_Receive(void)
 
 void PWM_SetPulse_us(uint16_t us)
 {
-    if (us < 1000) us = 600;
-    if (us > 2000) us = 2600;
+    if (us < 600)  us = 600;
+    if (us > 2600) us = 2600;
 
     pwm_us = us;
     __HAL_TIM_SET_COMPARE(&htim14, TIM_CHANNEL_1, us);
+}
+
+void Servo_SetAngleFromXY(int32_t x, int32_t y)
+{
+    float angle_deg;
+    uint16_t pulse;
+
+    /* On refuse les Y négatifs */
+    if (y < 0)
+    {
+        parse_err_count++;
+        return;
+    }
+
+    /* Cas spécial : origine */
+    if ((x == 0) && (y == 0))
+    {
+        servo_angle_deg = 0.0f;
+        PWM_SetPulse_us(600);
+        return;
+    }
+
+    /* Angle en degrés entre 0 et 180 si y >= 0 */
+    angle_deg = atan2f((float)y, (float)x) * 57.2957795f;
+
+    if (angle_deg < 0.0f)   angle_deg = 0.0f;
+    if (angle_deg > 180.0f) angle_deg = 180.0f;
+
+    servo_angle_deg = angle_deg;
+
+    /* Mapping angle -> PWM : 0°=600us, 180°=2600us */
+    pulse = (uint16_t)(600.0f + (angle_deg * (2000.0f / 180.0f)) + 0.5f);
+    PWM_SetPulse_us(pulse);
+}
+
+void ProcessRxLine(char *line)
+{
+    char *comma;
+    char *endptr1;
+    char *endptr2;
+    long x;
+    long y;
+
+    comma = strchr(line, ',');
+    if (comma == NULL)
+    {
+        parse_err_count++;
+        return;
+    }
+
+    *comma = '\0';
+
+    x = strtol(line, &endptr1, 10);
+    y = strtol(comma + 1, &endptr2, 10);
+
+    if ((*endptr1 != '\0') || (*endptr2 != '\0'))
+    {
+        parse_err_count++;
+        return;
+    }
+
+    coord_x = (int32_t)x;
+    coord_y = (int32_t)y;
+    frame_count++;
+
+    Servo_SetAngleFromXY(coord_x, coord_y);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1)
     {
-        last_rx = rx_byte;
         rx_count++;
 
-        /* Accepte ASCII '0'/'1' ou binaire 0x00/0x01 */
-        if ((rx_byte == '0') || (rx_byte == 0x00))
+        if (rx_byte == '\r')
         {
-            PWM_SetPulse_us(600);
+            /* Ignore CR */
         }
-        else if ((rx_byte == '1') || (rx_byte == 0x01))
+        else if (rx_byte == '\n')
         {
-            PWM_SetPulse_us(2600);
+            rx_line[rx_line_idx] = '\0';
+
+            if (rx_line_idx > 0)
+            {
+                ProcessRxLine(rx_line);
+            }
+
+            rx_line_idx = 0;
+        }
+        else
+        {
+            if (rx_line_idx < (sizeof(rx_line) - 1))
+            {
+                rx_line[rx_line_idx++] = (char)rx_byte;
+            }
+            else
+            {
+                /* Overflow buffer -> on jette la ligne */
+                rx_line_idx = 0;
+                parse_err_count++;
+            }
         }
 
         HAL_UART_Receive_IT(&huart1, (uint8_t *)&rx_byte, 1);
@@ -106,6 +200,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         uart_last_err = HAL_UART_GetError(huart);
         uart_err_count++;
 
+        rx_line_idx = 0;
         HAL_UART_Receive_IT(&huart1, (uint8_t *)&rx_byte, 1);
     }
 }
@@ -141,7 +236,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim14, TIM_CHANNEL_1);
 
   /* PWM présent dès le démarrage : 1 ms à 50 Hz */
-  PWM_SetPulse_us(1000);
+  PWM_SetPulse_us(600);
 
   /* Réception UART */
   UART_Start_Receive();
